@@ -227,6 +227,11 @@ def main():
     (site / "feed.xml").write_text(f'<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>Insider cluster buys</title><link>{base}</link><description>2+ insiders buying on the open market. {esc(DISCLAIMER)}</description><copyright>Created by Caleb Love</copyright>{it}</channel></rss>')
     (site / "sitemap.xml").write_text('<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' + "".join(f"<url><loc>{u}</loc><lastmod>{today}</lastmod></url>" for u in urls) + "</urlset>")
     (site / "robots.txt").write_text(f"User-agent: *\nAllow: /\nSitemap: {base}sitemap.xml\n")
+    # IndexNow key file (key stored in data/indexnow_key.txt)
+    _ink = ROOT / "data" / "indexnow_key.txt"
+    if _ink.exists():
+        _k = _ink.read_text().strip()
+        (site / f"{_k}.txt").write_text(_k)
     (site / "netlify.toml").write_text('[build]\n  publish = "."\n  command = ""\n')
     # members: full CSV + brief
     with open(mem / f"insider_buys_30d_{today}.csv", "w", newline="") as f:
