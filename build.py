@@ -32,6 +32,74 @@ def money(v):
     v = float(v or 0)
     return f"${v/1e6:.2f}M" if v >= 1e6 else (f"${v/1e3:.0f}K" if v >= 1e3 else f"${v:,.0f}")
 
+def pct(part, total):
+    """One decimal, floored, so 99.96% reads 99.9% and only a true 100% reads 100%."""
+    if not total: return "0%"
+    if part >= total: return "100%"
+    import math; return f"{math.floor(1000*part/total)/10:.1f}%"
+
+def mcp_tool(name, args):
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": args}}).encode()
+    req = urllib.request.Request(MCP, data=body, headers={"content-type": "application/json",
+            "accept": "application/json, text/event-stream", "user-agent": "MonRiah insider-clusters builder"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.loads(json.load(r)["result"]["content"][0]["text"])
+
+def accession(url):
+    parts = (url or "").split("/")
+    return parts[-2] if len(parts) > 2 else url
+
+def dedupe_row(r, since):
+    """Rebuild an issuer row from transaction-level data so each purchase counts once.
+    1) rows are deduped by accession + transaction row (date, shares, price, ownedAfter);
+    2) owners on one accession are one buyer, and separate accessions reporting the identical
+       holding (same date, shares, price and shares-owned-after) are merged into one beneficial group;
+    3) a cluster needs 2+ distinct buyers after that."""
+    try:
+        d = mcp_tool("get_insider_trades", {"ticker_or_cik": r["ticker"] or r["cik"].lstrip("0"), "side": "buy",
+                                            "since": since, "filings": 25, "max_rows": 100})
+    except Exception as e:
+        print(f"warn: dedupe skipped for {r['ticker'] or r['cik']}: {e}", file=sys.stderr); return r
+    tx = [t for t in d.get("transactions", []) if t.get("code") == "P" and (t.get("date") or "") >= r["firstDate"]]
+    if not tx: return r
+    seen, rows = set(), []
+    for t in tx:
+        k = (accession(t["url"]), t["date"], t["shares"], t["price"], t.get("ownedAfter"))
+        if k not in seen: seen.add(k); rows.append(t)
+    parent = {}
+    def find(a):
+        while parent.setdefault(a, a) != a: a = parent[a]
+        return a
+    holding, owner = {}, {}
+    for t in rows:
+        a0 = accession(t["url"]); find(a0); nm = t["insider"].strip().lower()
+        if nm in owner: parent[find(a0)] = find(owner[nm])  # same person/entity across filings = one buyer
+        else: owner[nm] = a0
+    for t in rows:
+        a = accession(t["url"]); find(a)
+        hk = (t["date"], t["shares"], t["price"], t.get("ownedAfter"))
+        if hk in holding: parent[find(a)] = find(holding[hk])
+        else: holding[hk] = a
+    groups = {}
+    for t in rows:
+        g = groups.setdefault(find(accession(t["url"])), {"names": [], "role": t["role"], "tx": {}, "url": t["url"], "filed": ""})
+        if t["insider"] not in g["names"]: g["names"].append(t["insider"])
+        g["tx"].setdefault((t["date"], t["shares"], t["price"], t.get("ownedAfter")), t)  # same holding once per group
+        if (t.get("filed") or "") >= g["filed"]: g["filed"], g["url"] = t.get("filed") or "", t["url"]
+    buyers = []
+    for g in groups.values():
+        v = sum(t["valueUsd"] for t in g["tx"].values()); sh = sum(t["shares"] for t in g["tx"].values())
+        name = g["names"][0] + (" (joint filing)" if len(g["names"]) > 1 else "")
+        buyers.append({"name": name, "role": g["role"], "valueUsd": v, "shares": sh, "owners": g["names"], "filed": g["filed"], "url": g["url"]})
+    allt = [t for g in groups.values() for t in g["tx"].values()]
+    r = dict(r); r["insiders"] = sorted(buyers, key=lambda b: -b["valueUsd"]); r["insiderCount"] = len(buyers)
+    r["clusterBuy"] = len(buyers) >= 2
+    r["totalValueUsd"] = sum(t["valueUsd"] for t in allt); r["totalShares"] = sum(t["shares"] for t in allt)
+    r["avgPrice"] = round(r["totalValueUsd"] / r["totalShares"], 4) if r["totalShares"] else 0
+    r["firstDate"] = min(t["date"] for t in allt); r["lastDate"] = max(t["date"] for t in allt)
+    r["latestFilingUrl"] = max(buyers, key=lambda b: b["filed"])["url"]; r["deduped"] = True
+    return r
+
 def slug(t): return "".join(ch for ch in (t or "").lower() if ch.isalnum() or ch == "-") or "na"
 
 def summary(r):
@@ -47,7 +115,7 @@ def summary(r):
     parts = [f"{n} {w}" for n, w in ((officers, "officer(s)"), (directors, "director(s)"), (owners, "10% owner(s)")) if n]
     if parts: s += "Buyers include " + ", ".join(parts) + ". "
     if top and r["totalValueUsd"]:
-        s += f"The largest single buyer, {esc(top['name'])} ({esc(top['role'])}), accounts for {100*top['valueUsd']/r['totalValueUsd']:.0f}% of the dollar value."
+        s += f"The largest single buyer, {esc(top['name'])} ({esc(top['role'])}), accounts for {pct(top['valueUsd'], r['totalValueUsd'])} of the dollar value."
     return s
 
 CSS = ("body{font:16px/1.55 system-ui,sans-serif;max-width:980px;margin:0 auto;padding:1rem;color:#1b1b1b}"
@@ -94,6 +162,9 @@ def main():
         for k, dv in (("avgPrice", 0), ("totalShares", 0), ("totalValueUsd", 0), ("insiders", []), ("latestFilingUrl", ""), ("issuer", "")):
             if r.get(k) is None: r[k] = dv
         r.setdefault("firstDate", r.get("lastDate", "")); r.setdefault("lastDate", r["firstDate"])
+    if not a.offline:
+        rows = [dedupe_row(r, d30["window"]["from"]) if r["insiderCount"] >= 2 else r for r in rows]
+        d30["results"] = rows; d30["clusterBuys"] = sum(1 for r in rows if r["clusterBuy"])
     hist = ROOT / "data/history"; hist.mkdir(parents=True, exist_ok=True)
     (hist / f"{today}.json").write_text(json.dumps(d30))
     site = ROOT / "out/site"; mem = ROOT / "out/members"; posts = ROOT / "out/posts"
@@ -133,8 +204,8 @@ def main():
     (site / "methodology/index.html").write_text(page("Methodology: how insider cluster buys are detected", "How the list is built from SEC Form 4.",
         "<h1>Methodology</h1><ul><li>Source: every new Form 4 on SEC EDGAR, scanned every 10 minutes by our Worker under SEC fair-access rules (declared User-Agent, &lt;10 req/s).</li>"
         "<li>Only non-derivative transactions with code <b>P</b> (open-market or private purchase) count. Awards, option exercises, tax withholding and gifts are excluded.</li>"
-        "<li>Grouped by issuer over the look-back window; a <b>cluster buy</b> = 2+ distinct reporting owners.</li><li>Coverage starts when the scanner was deployed and rolls up to 30 days.</li>"
-        "<li>Known limits: amended filings, joint filers (funds and their managers can both appear), and parsing errors. Always read the filing.</li></ul>", base+"methodology/", 1))
+        "<li>Grouped by issuer over the look-back window; a <b>cluster buy</b> = 2+ distinct buyers. Transactions are deduped by filing and row, all reporting owners on one filing count as one buyer, and separate filings that report the identical holding (joint filers such as a fund, its manager and its partners) are merged into one buyer.</li><li>Coverage starts when the scanner was deployed and rolls up to 30 days.</li>"
+        "<li>Known limits: amended filings and parsing errors. Always read the filing.</li></ul>", base+"methodology/", 1))
     # RSS + sitemap + robots
     it = "".join(f"<item><title>{esc(r['ticker'] or '')}: {r['insiderCount']} insiders bought {money(r['totalValueUsd'])}</title><link>{base}{slug(r['ticker'] or r['cik'])}/</link>"
                  f"<guid isPermaLink=\"false\">{r['cik']}-{r['lastDate']}-{r['insiderCount']}</guid><description>{esc(summary(r))} {esc(DISCLAIMER)}</description></item>" for r in week)
