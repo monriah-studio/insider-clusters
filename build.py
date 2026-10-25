@@ -152,8 +152,16 @@ def main():
     brief += ["", f"_{DISCLAIMER} Parsed automatically; check every filing._"]
     (mem / f"brief_{today}.md").write_text("\n".join(brief))
     # draft posts (NOT posted)
-    top = week[:3]
-    x = f"Insider cluster buys, week to {today} (SEC Form 4, open-market only):\n" + "\n".join(f"${r['ticker'] or r['issuer'][:20]}: {r['insiderCount']} insiders, {money(r['totalValueUsd'])}" for r in top) + f"\nFull list + filings: {base}\n{DISCLAIMER}"
+    top = sorted(week, key=lambda r: -r["totalValueUsd"])[:3]
+    def label(r): return f"${r['ticker']}" if r["ticker"] else r["issuer"][:30]
+    def mk(items): return (f"Insider cluster buys, week to {today} (SEC Form 4, open-market only):\n" + "".join(
+        f"{label(r)}: {r['insiderCount']} insiders, {money(r['totalValueUsd'])}\n" for r in items) +
+        f"Full list + filings: {base}\nSEC Form 4 data. Not investment advice.")
+    def xlen(t): return len(t) - len(base) + 23
+    while True:
+        x = mk(top)
+        if (xlen(x) <= 280 and len(x) <= 300) or not top: break
+        top = top[:-1]
     (posts / f"x_{today}.txt").write_text(x)
     print(f"built {len(urls)} urls, {len(clusters)} cluster pages, {len(rows)} issuers; x draft {len(x)} chars")
 
