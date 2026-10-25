@@ -100,6 +100,20 @@ def dedupe_row(r, since):
     r["latestFilingUrl"] = max(buyers, key=lambda b: b["filed"])["url"]; r["deduped"] = True
     return r
 
+MIN_BUYER_USD = 10000
+BANKS = ("BANK OF AMERICA", "JPMORGAN", "J.P. MORGAN", "GOLDMAN SACHS", "MORGAN STANLEY", "CITIGROUP", "WELLS FARGO", "UBS", "BARCLAYS")
+
+def is_bank(name): return any(b in (name or "").upper() for b in BANKS)
+
+def apply_buyer_rules(r):
+    """Only buyers with >= $10K of open-market purchases in the window, and not big broker-dealer/bank filers,
+    count toward a cluster. Everyone still appears in the filing list."""
+    r = dict(r); n = 0
+    for i in r["insiders"]:
+        i["counted"] = i.get("valueUsd", 0) >= MIN_BUYER_USD and not is_bank(i["name"]); n += i["counted"]
+    r["insiderCount"] = n; r["clusterBuy"] = n >= 2
+    return r
+
 def slug(t): return "".join(ch for ch in (t or "").lower() if ch.isalnum() or ch == "-") or "na"
 
 def summary(r):
@@ -164,7 +178,8 @@ def main():
         r.setdefault("firstDate", r.get("lastDate", "")); r.setdefault("lastDate", r["firstDate"])
     if not a.offline:
         rows = [dedupe_row(r, d30["window"]["from"]) if r["insiderCount"] >= 2 else r for r in rows]
-        d30["results"] = rows; d30["clusterBuys"] = sum(1 for r in rows if r["clusterBuy"])
+    rows = [apply_buyer_rules(r) for r in rows]
+    d30["results"] = rows; d30["clusterBuys"] = sum(1 for r in rows if r["clusterBuy"])
     hist = ROOT / "data/history"; hist.mkdir(parents=True, exist_ok=True)
     (hist / f"{today}.json").write_text(json.dumps(d30))
     site = ROOT / "out/site"; mem = ROOT / "out/members"; posts = ROOT / "out/posts"
@@ -204,7 +219,7 @@ def main():
     (site / "methodology/index.html").write_text(page("Methodology: how insider cluster buys are detected", "How the list is built from SEC Form 4.",
         "<h1>Methodology</h1><ul><li>Source: every new Form 4 on SEC EDGAR, scanned every 10 minutes by our Worker under SEC fair-access rules (declared User-Agent, &lt;10 req/s).</li>"
         "<li>Only non-derivative transactions with code <b>P</b> (open-market or private purchase) count. Awards, option exercises, tax withholding and gifts are excluded.</li>"
-        "<li>Grouped by issuer over the look-back window; a <b>cluster buy</b> = 2+ distinct buyers. Transactions are deduped by filing and row, all reporting owners on one filing count as one buyer, and separate filings that report the identical holding (joint filers such as a fund, its manager and its partners) are merged into one buyer.</li><li>Coverage starts when the scanner was deployed and rolls up to 30 days.</li>"
+        "<li>Grouped by issuer over the look-back window; a <b>cluster buy</b> = 2+ distinct buyers. Transactions are deduped by filing and row, all reporting owners on one filing count as one buyer, and separate filings that report the identical holding (joint filers such as a fund, its manager and its partners) are merged into one buyer.</li><li>A buyer only counts toward a cluster if their open-market purchases in the window total at least $10,000. Large broker-dealer and bank filers (for example Bank of America, JPMorgan, Goldman Sachs, Morgan Stanley, Citigroup, Wells Fargo, UBS and Barclays) are not counted as buyers, though their filings still appear in the list.</li><li>Coverage starts when the scanner was deployed and rolls up to 30 days.</li>"
         "<li>Known limits: amended filings and parsing errors. Always read the filing.</li></ul>", base+"methodology/", 1))
     # RSS + sitemap + robots
     it = "".join(f"<item><title>{esc(r['ticker'] or '')}: {r['insiderCount']} insiders bought {money(r['totalValueUsd'])}</title><link>{base}{slug(r['ticker'] or r['cik'])}/</link>"
