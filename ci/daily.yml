@@ -1,0 +1,26 @@
+# Daily rebuild + deploy. Copy to .github/workflows/daily.yml (needs a GitHub token with the `workflow` scope to push).
+# Secrets: NETLIFY_AUTH_TOKEN (Netlify personal access token). NETLIFY_SITE_ID is a repo variable (not secret).
+name: daily-build
+on:
+  schedule: [{ cron: "30 12 * * *" }]   # 12:30 UTC = 7:30 AM CDT / 6:30 AM CST
+  workflow_dispatch: {}
+permissions: { contents: write }
+concurrency: { group: daily-build, cancel-in-progress: false }
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+      NETLIFY_SITE_ID: ${{ vars.NETLIFY_SITE_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 build.py --site-url "https://insider-clusters.netlify.app"
+      - name: Commit daily snapshot
+        run: |
+          git config user.name "Caleb Love"
+          git config user.email "347213852+monriah-studio@users.noreply.github.com"
+          git add data/history
+          git diff --cached --quiet || (git commit -m "snapshot $(date -u +%F)" && git push)
+      - name: Deploy to Netlify
+        if: ${{ env.NETLIFY_AUTH_TOKEN != '' }}
+        run: npx -y netlify-cli@17 deploy --prod --dir out/site --site "$NETLIFY_SITE_ID" --auth "$NETLIFY_AUTH_TOKEN" --message "daily $(date -u +%F)"
